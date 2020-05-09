@@ -1,0 +1,25 @@
+trigger:
+- more-debug-output
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- checkout: self
+  fetchDepth: 1
+- powershell: |
+    choco install msys2 --noprogress --yes
+    choco install bazel --noprogress --yes
+    choco install zip --noprogress --yes
+  displayName: 'Installing dependencies'
+- powershell: |
+    C:\tools\msys64\usr\bin\pacman -S zip --noconfirm
+- powershell: |
+    bazel build //src/main/cpp:client //src:package-zip_jdk_minimal  -c opt --stamp --embed_label 2.0.0
+    C:\tools\msys64\msys2_shell.cmd -defterm -no-start -here -c "cat bazel-bin/src/main/cpp/client.exe bazel-bin/src/package_jdk_minimal.zip > bazel.exe && zip -A bazel.exe"
+    zip bazel.zip bazel.exe
+    cp bazel.zip $env:BUILD_ARTIFACTSTAGINGDIRECTORY/
+- task: PublishPipelineArtifact@0
+  inputs:
+    targetPath: $(Build.StagingDirectory)/bazel.zip
+    artifactName: 'ductape bazel bindist'
