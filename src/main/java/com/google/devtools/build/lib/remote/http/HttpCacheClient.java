@@ -25,6 +25,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
+import com.google.devtools.build.lib.remote.RemoteRetrier;
 import com.google.devtools.build.lib.remote.common.CacheNotFoundException;
 import com.google.devtools.build.lib.remote.common.RemoteActionExecutionContext;
 import com.google.devtools.build.lib.remote.common.RemoteCacheClient;
@@ -132,6 +133,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
   private final boolean useTls;
   private final boolean verifyDownloads;
   private final DigestUtil digestUtil;
+  private final RemoteRetrier retrier;
 
   private final Object closeLock = new Object();
 
@@ -153,6 +155,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
       boolean verifyDownloads,
       ImmutableList<Entry<String, String>> extraHttpHeaders,
       DigestUtil digestUtil,
+      RemoteRetrier retrier,
       @Nullable final Credentials creds)
       throws Exception {
     return new HttpCacheClient(
@@ -164,6 +167,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
         verifyDownloads,
         extraHttpHeaders,
         digestUtil,
+        retrier,
         creds,
         null);
   }
@@ -176,6 +180,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
       boolean verifyDownloads,
       ImmutableList<Entry<String, String>> extraHttpHeaders,
       DigestUtil digestUtil,
+      RemoteRetrier retrier,
       @Nullable final Credentials creds)
       throws Exception {
 
@@ -189,6 +194,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
           verifyDownloads,
           extraHttpHeaders,
           digestUtil,
+          retrier,
           creds,
           domainSocketAddress);
     } else if (Epoll.isAvailable()) {
@@ -201,6 +207,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
           verifyDownloads,
           extraHttpHeaders,
           digestUtil,
+          retrier,
           creds,
           domainSocketAddress);
     } else {
@@ -217,6 +224,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
       boolean verifyDownloads,
       ImmutableList<Entry<String, String>> extraHttpHeaders,
       DigestUtil digestUtil,
+      RemoteRetrier retrier,
       @Nullable final Credentials creds,
       @Nullable SocketAddress socketAddress)
       throws Exception {
@@ -285,6 +293,7 @@ public final class HttpCacheClient implements RemoteCacheClient {
     this.extraHttpHeaders = extraHttpHeaders;
     this.verifyDownloads = verifyDownloads;
     this.digestUtil = digestUtil;
+    this.retrier = retrier;
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -440,22 +449,24 @@ public final class HttpCacheClient implements RemoteCacheClient {
   @Override
   public ListenableFuture<Void> downloadBlob(
       RemoteActionExecutionContext context, Digest digest, OutputStream out) {
-    final DigestOutputStream digestOut =
-        verifyDownloads ? digestUtil.newDigestOutputStream(out) : null;
-    return Futures.transformAsync(
-        get(digest, digestOut != null ? digestOut : out, /* casDownload= */ true),
-        (v) -> {
-          try {
-            if (digestOut != null) {
-              Utils.verifyBlobContents(digest, digestOut.digest());
-            }
-            out.flush();
-            return Futures.immediateFuture(null);
-          } catch (IOException e) {
-            return Futures.immediateFailedFuture(e);
-          }
-        },
-        MoreExecutors.directExecutor());
+    return retrier.executeAsync(() -> {
+        final DigestOutputStream digestOut =
+            verifyDownloads ? digestUtil.newDigestOutputStream(out) : null;
+        return Futures.transformAsync(
+            get(digest, digestOut != null ? digestOut : out, /* casDownload= */ true),
+            (v) -> {
+              try {
+                if (digestOut != null) {
+                  Utils.verifyBlobContents(digest, digestOut.digest());
+                }
+                out.flush();
+                return Futures.immediateFuture(null);
+              } catch (IOException e) {
+                return Futures.immediateFailedFuture(e);
+              }
+            },
+            MoreExecutors.directExecutor());
+    });
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -575,8 +586,8 @@ public final class HttpCacheClient implements RemoteCacheClient {
   @Override
   public ListenableFuture<ActionResult> downloadActionResult(
       RemoteActionExecutionContext context, ActionKey actionKey, boolean inlineOutErr) {
-    return Utils.downloadAsActionResult(
-        actionKey, (digest, out) -> get(digest, out, /* casDownload= */ false));
+    return retrier.executeAsync(() -> Utils.downloadAsActionResult(
+        actionKey, (digest, out) -> get(digest, out, /* casDownload= */ false)));
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -673,20 +684,22 @@ public final class HttpCacheClient implements RemoteCacheClient {
   @Override
   public ListenableFuture<Void> uploadFile(
       RemoteActionExecutionContext context, Digest digest, Path file) {
+    InputStream in;
     try {
-      return uploadAsync(
-          digest.getHash(), digest.getSizeBytes(), file.getInputStream(), /* casUpload= */ true);
+      in = file.getInputStream();
     } catch (IOException e) {
       // Can be thrown from file.getInputStream.
       return Futures.immediateFailedFuture(e);
     }
+    return retrier.executeAsync(() -> uploadAsync(
+        digest.getHash(), digest.getSizeBytes(), in, /* casUpload= */ true));
   }
 
   @Override
   public ListenableFuture<Void> uploadBlob(
       RemoteActionExecutionContext context, Digest digest, ByteString data) {
-    return uploadAsync(
-        digest.getHash(), digest.getSizeBytes(), data.newInput(), /* casUpload= */ true);
+    return retrier.executeAsync(() -> uploadAsync(
+        digest.getHash(), digest.getSizeBytes(), data.newInput(), /* casUpload= */ true));
   }
 
   @Override

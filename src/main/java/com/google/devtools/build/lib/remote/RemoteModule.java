@@ -213,7 +213,16 @@ public final class RemoteModule extends BlazeModule {
               remoteOptions,
               creds,
               Preconditions.checkNotNull(env.getWorkingDirectory(), "workingDirectory"),
-              digestUtil);
+              digestUtil,
+              new RemoteRetrier(
+                 remoteOptions,
+                 (e) -> {
+                     System.err.println("RETRYING: " + e.toString());
+                     return true;
+                 },
+                 retryScheduler,
+                 Retrier.ALLOW_ALL_CALLS)
+              );
     } catch (IOException e) {
       handleInitFailure(env, e, Code.CACHE_INIT_FAILURE);
       return;
